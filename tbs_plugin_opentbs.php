@@ -7,8 +7,8 @@
  * This TBS plug-in can open a zip file, read the central directory,
  * and retrieve the content of a zipped file which is not compressed.
  *
- * @version 1.11.0
- * @date 2023-05-15
+ * @version 1.12.1
+ * @date 2024-03-06
  * @see     http://www.tinybutstrong.com/plugins.php
  * @author  Skrol29 http://www.tinybutstrong.com/onlyyou.html
  * @license LGPL-3.0
@@ -33,6 +33,7 @@ define('OPENTBS_EDIT_ENTITY','clsOpenTBS.EditEntity');  // command to edit an at
 define('OPENTBS_READ_ENTITY','clsOpenTBS.ReadEntity');  // command to read an attribute
 define('OPENTBS_FILEEXISTS','clsOpenTBS.FileExists');
 define('OPENTBS_GET_FILES','clsOpenTBS.GetFiles');
+define('OPENTBS_GET_FILES_BY_TYPE','clsOpenTBS.GetFilesByType');
 define('OPENTBS_GET_OPENED_FILES','clsOpenTBS.GetOpenedFiles');
 define('OPENTBS_WALK_OPENED_FILES','clsOpenTBS.WalkOpenedFiles');
 define('OPENTBS_CHART','clsOpenTBS.Chart');
@@ -92,8 +93,10 @@ class clsOpenTBS extends clsTbsZip {
 	public $OutputMode;
 	public $OutputHandle;
 
-	private $TbsStoreLst;
-	private $TbsCurrIdx;
+	public $TbsStoreLst; // public required to be used by plugins for scanning opened files
+	public $TbsCurrIdx;  // public required to be used by plugins for scanning opened files
+	public $ExtEquiv;
+
 	private $TbsSystemCredits;
 	private $TbsNoField;
 	private $IdxToCheck;
@@ -102,7 +105,6 @@ class clsOpenTBS extends clsTbsZip {
 	private $ImageInternal;
 	private $LastReadNotStored;
 
-	private $ExtEquiv;
 	private $ExtType;
 	private $OtbsSheetSlidesDelete;
 	private $OtbsSheetSlidesVisible;
@@ -145,7 +147,7 @@ class clsOpenTBS extends clsTbsZip {
 		if (!isset($TBS->OtbsClearMsPowerpoint))    $TBS->OtbsClearMsPowerpoint = true;
 		if (!isset($TBS->OtbsGarbageCollector))     $TBS->OtbsGarbageCollector = true;
 		if (!isset($TBS->OtbsMsExcelCompatibility)) $TBS->OtbsMsExcelCompatibility = true;
-		$this->Version = '1.11.0';
+		$this->Version = '1.12.1';
 		$this->DebugLst = false; // deactivate the debug mode
 		$this->ExtInfo = false;
 		$TBS->TbsZip = &$this; // a shortcut
@@ -444,8 +446,11 @@ class clsOpenTBS extends clsTbsZip {
 
 	}
 
+	/**
+	 * In this TBS event, parameter ope is exploded, and there is one function call for each ope command.
+	 */
 	function OnOperation($FieldName,&$Value,&$PrmLst,&$Txt,$PosBeg,$PosEnd,&$Loc) {
-	// in this event, ope is exploded, there is one function call for each ope command
+
 		$ope = $PrmLst['ope'];
 		if ($ope==='addpic') {
 			// for compatibility
@@ -842,7 +847,7 @@ class clsOpenTBS extends clsTbsZip {
 				}
 			} elseif ($this->ExtEquiv=='odp') {
 				// Only for compatibility
-				$p = instr($TBS->Source, $str);
+				$p = strpos($this->TBS->Source, $x1);
 				return ($p===false) ? false : 1;
 			} else {
 				return false;
@@ -901,7 +906,7 @@ class clsOpenTBS extends clsTbsZip {
 			}
 			
 			return $res;
-		
+
 		} elseif ($Cmd==OPENTBS_SYSTEM_CREDIT) {
 
 			$x1 = (boolean) $x1;
@@ -940,10 +945,60 @@ class clsOpenTBS extends clsTbsZip {
 		} elseif ($Cmd==OPENTBS_GET_FILES) {
 	
 			$files = array();
+
 			// All files in the archive
 			foreach ($this->CdFileLst as $f) {
 				$files[] = $f['v_name'];
 			}
+
+			return $files;
+
+		} elseif ($Cmd==OPENTBS_GET_FILES_BY_TYPE) {
+	
+			$files = array();
+			$types = $x1;
+			if (is_string($types)) {
+				$types = array($types);
+			}
+
+			if ($this->ExtType=='odf') {
+
+				// this commande is not really supported for LibreOffice
+				if (in_array('main', $types)) {
+					$files[] = $this->ExtInfo['main'];
+				}
+
+			} elseif ($this->ExtType=='openxml') {
+
+				// We convert alias into short types
+				$alias = array(
+					'main'     => array('wordprocessingml.document.main+xml'),
+					'header'   => array('wordprocessingml.header+xml'),
+					'footer'   => array('wordprocessingml.footer+xml'),
+					'chart'    => array('drawingml.chart+xml'),
+					'slide'    => array('presentationml.slide+xml'),
+					'slidem'   => array('presentationml.slideMaster+xml'),
+					'sheet'    => array('spreadsheetml.worksheet+xml'),
+					'comments' => array('presentationml.notesSlide+xml', 'wordprocessingml.comments+xml', 'spreadsheetml.comments+xml'),
+				);
+
+				$types_conv = array();
+				if (in_array('all', $types)) {
+					$types = array_merge($types, array_keys($alias));
+				}
+				foreach ($types as $t) {
+					if ($t == 'all') {
+					} elseif (isset($alias[$t])) {
+						$types_conv = array_merge($types_conv, $alias[$t]);
+					} else {
+						$types_conv[] = $t;
+					}
+				}
+
+				$files = $this->OpenXML_MapGetFiles($types_conv);
+
+			}
+
 			return $files;
 			
 		} elseif ($Cmd==OPENTBS_CHART_DELETE_CATEGORY) {
@@ -1172,8 +1227,12 @@ class clsOpenTBS extends clsTbsZip {
 
 	/**
 	 * Save a given source in the store.
-	 * $onshow=true means [onshow] are merged before the output. 
-	 * If $onshow is null, then the 'onshow' option stays unchanged.
+	 * 
+	 * @param integer      $idx     Index of the sub-file.
+	 * @param string       $src     New contents.
+	 * @param boolean|null $onshow  (optional, default is null) Null means unchanged, of false for new files.  
+	 *                               true means that TBS->Show() will be processed for the sub-file before the output.
+	 *                               true aslo means the the sub-file will be considered as opened for the commands that return opened files.
 	 */
 	function TbsStorePut($idx, $src, $onshow = null) {
 		if ($idx===$this->TbsCurrIdx) {
@@ -1519,7 +1578,9 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 	/**
 	 * Prepare the TBS field for merging a picture: the TBS field is moved to the target attribute.
 	 * This is done only once when it is a block merging.
-	 * The actual image replacement is done with $this->TbsPicAdd()
+	 * The actual image replacement is done by $this->TbsPicAdd()
+	 *
+	 * @return boolean Return true if the preparation ends correctly or if it as already been ended correctly before.
 	 */
 	function TbsPicPrepare(&$Txt, &$Loc, $IsCaching) {
 
@@ -1531,8 +1592,8 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 			return $this->RaiseError('Parameter att is used with parameter ope=changepic in the field ['.$Loc->FullName.']. changepic will be ignored');
 		}
 		
+		// Direction of search
 		$backward = true;
-
 		if (isset($Loc->PrmLst['tagpos'])) {
 			$s = $Loc->PrmLst['tagpos'];
 			if ($s=='before') {
@@ -1562,8 +1623,10 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		} else {
 			return $this->RaiseError('Parameter ope=changepic used in the field ['.$Loc->FullName.'] is not supported with the current document type.');
 		}
-				
-		// Move the field to the attribute
+		
+		$LocDef = substr($Txt, $Loc->PosBeg, $Loc->PosEnd - $Loc->PosBeg + 1);
+		
+		// Move the field to the target attribute
 		// This technical works while caching TBS fields because already cached fields are necessarily placed before the current picture.
 		$prefix = ($backward) ? '' : '+';
 		$Loc->PrmLst['att'] = $prefix.$att;
@@ -1574,6 +1637,26 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 
 		$Loc->PrmLst['magnet'] = $magnet;
 
+		/*
+		With an OpenXML document, the TBS field defined in the property Description or Title can be silently duplicated to another entity nearby (usually <pic:cNvPr>).
+		This will make the picture replacement to be processed twice : one fof each TBS field. But this won't make always error because the external file will be inserted onyl once and the two Rid will be the same.
+		Nevertheless, if the picture use parameter 'adjust' then this will corrupt the XML when several cached TBS fields have to be merged the the same picture element.
+		This is because the redim process uses relative cached positioning.
+		In order to evoid this error and to optimize picture replacement, any duplicated TBS field in the picture element will be neutralized.
+		*/
+		$PicLoc = false;
+		if (isset($this->ExtInfo['pic_entity'])) {
+			$PicLoc = clsTbsXmlLoc::FindElement($Txt, $this->ExtInfo['pic_entity'], $Loc->PosBeg, false);
+			if ($PicLoc) {
+				// We neutralized the duplicated definition but we must keep the current locatore positioning because it is quite complicated for now
+				$PicLoc->switchToRelative();
+				$src = $PicLoc->GetSrc();
+				$src = str_replace($LocDef, str_repeat(' ', strlen($LocDef)), $src); // important : same length than $Loc because dim positioning must not change
+				$PicLoc->ReplaceSrc($src);
+				$PicLoc->switchToNormal();
+			}
+		}
+
 		// Get picture dimension information
 		if (isset($Loc->PrmLst['adjust'])) {
 			$FieldLen = 0;
@@ -1583,7 +1666,7 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 				if (strpos($att,'v:imagedata')!==false) { 
 					$Loc->Prop['otbsDim'] = $this->TbsPicGetDim_OpenXML_vml($Txt, $Loc->PosBeg, false, $Loc->PosBeg, $FieldLen);
 				} else {
-					$Loc->Prop['otbsDim'] = $this->TbsPicGetDim_OpenXML_dml($Txt, $Loc->PosBeg, false, $Loc->PosBeg, $FieldLen);
+					$Loc->Prop['otbsDim'] = $this->TbsPicGetDim_OpenXML_dml($Txt, $Loc->PosBeg, false, $Loc->PosBeg, $FieldLen, $PicLoc);
 				}
 			}
 		}
@@ -1599,7 +1682,7 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 			} elseif ($this->ExtType==='openxml') {
 				$InternalPicPath = $this->OpenXML_GetInternalPicPath($Value);
 				if ($InternalPicPath === false) {
-					$this->RaiseError('The picture to merge with field ['.$Loc->FullName.'] cannot be found. Value=' . $Value);
+					$this->RaiseError('The picture to merge with field ['.$Loc->FullName.'] cannot be found (Rid = ' . $Value . ').');
 				}
 			}
 
@@ -1616,36 +1699,34 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 	function TbsPicGetDim_ODF($Txt, $Pos, $Forward, $FieldPos, $FieldLen) {
 	// Found the attributes for the image dimensions, in an ODF file
 		// unit (can be: mm, cm, in, pi, pt)
-		$Offset = 0;
-		$dim = $this->TbsPicGetDim_Any($Txt, $Pos, $Forward, $FieldPos, $FieldLen, $Offset, 'draw:frame', 'svg:width="', 'svg:height="', 3, false, false);
+		$EntityOffset = 0;
+		$dim = $this->TbsPicGetDim_Any($Txt, $Pos, $Forward, $FieldPos, $FieldLen, $EntityOffset, 'draw:frame', 'svg:width="', 'svg:height="', 3, false, false);
 		return array($dim);
 	}
 
 	function TbsPicGetDim_OpenXML_vml($Txt, $Pos, $Forward, $FieldPos, $FieldLen) {
-		$Offset = 0;
-		$dim = $this->TbsPicGetDim_Any($Txt, $Pos, $Forward, $FieldPos, $FieldLen, $Offset, 'v:shape', 'width:', 'height:', 2, false, false);
+		$EntityOffset = 0;
+		$dim = $this->TbsPicGetDim_Any($Txt, $Pos, $Forward, $FieldPos, $FieldLen, $EntityOffset, 'v:shape', 'width:', 'height:', 2, false, false);
 		return array($dim);
 	}
 
-	function TbsPicGetDim_OpenXML_dml($Txt, $Pos, $Forward, $FieldPos, $FieldLen) {
+	function TbsPicGetDim_OpenXML_dml($Txt, $Pos, $Forward, $FieldPos, $FieldLen, $PicLoc) {
 
-		$Offset = 0;
+		$EntityOffset = 0;
 
-		// Try to find the drawing element
-		if (isset($this->ExtInfo['pic_entity'])) {
-			$tag = $this->ExtInfo['pic_entity'];
-			$Loc = clsTbsXmlLoc::FindElement($Txt, $this->ExtInfo['pic_entity'], $Pos, false);
-			if ($Loc) {
-				$Txt = $Loc->GetSrc();
-				$Pos = 0;
-				$Forward = true;
-				$Offset = $Loc->PosBeg;
-			}
+		// Loc of the picture entity
+		if ($PicLoc !== false) {
+			// The seach is done relatively to the picture entity
+			$PicLoc->FindEndTag();
+			$Txt = $PicLoc->GetSrc();
+			$Pos = 0;
+			$Forward = true;
+			$EntityOffset = $PicLoc->PosBeg;
 		}
 
-		$dim_shape = $this->TbsPicGetDim_Any($Txt, $Pos, $Forward, $FieldPos, $FieldLen, $Offset, 'wp:extent', 'cx="', 'cy="', 0, 12700, false);
-		$dim_inner = $this->TbsPicGetDim_Any($Txt, $Pos, $Forward, $FieldPos, $FieldLen, $Offset, 'a:ext'    , 'cx="', 'cy="', 0, 12700, 'uri="');
-		$dim_drawing = $this->TbsPicGetDim_Drawings($Txt, $Pos, $FieldPos, $FieldLen, $Offset, $dim_inner); // check for XLSX
+		$dim_shape = $this->TbsPicGetDim_Any($Txt, $Pos, $Forward, $FieldPos, $FieldLen, $EntityOffset, 'wp:extent', 'cx="', 'cy="', 0, 12700, false);
+		$dim_inner = $this->TbsPicGetDim_Any($Txt, $Pos, $Forward, $FieldPos, $FieldLen, $EntityOffset, 'a:ext'    , 'cx="', 'cy="', 0, 12700, 'uri="');
+		$dim_drawing = $this->TbsPicGetDim_Drawings($Txt, $Pos, $FieldPos, $FieldLen, $EntityOffset, $dim_inner); // check for XLSX
 
 		// dims must be sorted in reverse order of location
 		$result = array();
@@ -1658,8 +1739,8 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		
 	}
 
-	// Found the attributes for the image dimensions, in an ODF file
-	function TbsPicGetDim_Any($Txt, $Pos, $Forward, $FieldPos, $FieldLen, $Offset, $Element, $AttW, $AttH, $AllowedDec, $CoefToPt, $IgnoreIfAtt) {
+	// Found the attributes for the image dimensions, in any type of file
+	function TbsPicGetDim_Any($Txt, $Pos, $Forward, $FieldPos, $FieldLen, $EntityOffset, $Element, $AttW, $AttH, $AllowedDec, $CoefToPt, $IgnoreIfAtt) {
 
 		while (true) {
 
@@ -1669,36 +1750,40 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 			$pe = strpos($Txt, '>', $p);
 			if ($pe===false) return false;
 
-			$x = substr($Txt, $p, $pe -$p);
+			$src = substr($Txt, $p, $pe -$p);
 
-			if ( ($IgnoreIfAtt===false) || (strpos($x, $IgnoreIfAtt)===false) ) {
+			if ( ($IgnoreIfAtt===false) || (strpos($src, $IgnoreIfAtt)===false) ) {
 
-				$att_lst = array('w'=>$AttW, 'h'=>$AttH);
+				$att_lst = array('w' => $AttW, 'h' => $AttH);
 				$res_lst = array();
-
-				foreach ($att_lst as $i=>$att) {
-						$l = strlen($att);
-						$b = strpos($x, $att);
-						if ($b===false) return false;
-						$b = $b + $l;
-						$e = strpos($x, '"', $b);
-						$e2 = strpos($x, ';', $b); // in case of VML format, width and height are styles separted by ;
-						if ($e2!==false) $e = min($e, $e2);
-						if ($e===false) return false;
-						$lt = $e - $b;
-						$t = substr($x, $b, $lt);
-						$pu = $lt; // unit first char
-						while ( ($pu>1) && (!is_numeric($t[$pu-1])) ) $pu--;
-						$u = ($pu>=$lt) ? '' : substr($t, $pu);
-						$v = floatval(substr($t, 0, $pu));
-						$beg = $Offset+$p+$b;
-						if ($beg>$FieldPos) $beg = $beg - $FieldLen;
-						$res_lst[$i.'b'] = $beg; // start position in the main string
-						$res_lst[$i.'l'] = $lt; // length of the text
-						$res_lst[$i.'u'] = $u; // unit
-						$res_lst[$i.'v'] = $v; // value
-						$res_lst[$i.'t'] = $t; // text
-						$res_lst[$i.'o'] = 0; // offset
+				//$res_lst['debug_src'] = $src;
+				//$res_lst['debug_entity_offset'] = $EntityOffset;
+						
+				foreach ($att_lst as $dim => $att) {
+					$l = strlen($att);
+					$b = strpos($src, $att);
+					if ($b===false) return false;
+					$b = $b + $l;
+					$e = strpos($src, '"', $b);
+					$e2 = strpos($src, ';', $b); // in case of VML format, width and height are styles separted by ;
+					if ($e2!==false) $e = min($e, $e2);
+					if ($e===false) return false;
+					$lt = $e - $b;
+					$t = substr($src, $b, $lt);
+					$pu = $lt; // unit first char
+					while ( ($pu>1) && (!is_numeric($t[$pu-1])) ) $pu--;
+					$u = ($pu>=$lt) ? '' : substr($t, $pu);
+					$v = floatval(substr($t, 0, $pu));
+					$beg = $EntityOffset + $p + $b;
+					if ($beg>$FieldPos) $beg = $beg - $FieldLen;
+					$res_lst[$dim.'b'] = $beg; // start position in the main string
+					$res_lst[$dim.'l'] = $lt; // length of the text
+					$res_lst[$dim.'u'] = $u; // unit
+					$res_lst[$dim.'v'] = $v; // value
+					$res_lst[$dim.'t'] = $t; // text
+					$res_lst[$dim.'o'] = 0; // offset
+					//$res_lst[$dim.'_debug_val'] = substr($Txt, $p+$b, $lt);
+					//$res_lst[$dim.'_debug_att'] = $att;
 				}
 
 				$res_lst['r'] = ($res_lst['hv']==0) ? 0.0 : $res_lst['wv']/$res_lst['hv']; // ratio W/H
@@ -1718,7 +1803,7 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 	}
 
 	// Get Dim in an OpenXML Drawing (pictures in an XLSX)
-	function TbsPicGetDim_Drawings($Txt, $Pos, $FieldPos, $FieldLen, $Offset, $dim_inner) {
+	function TbsPicGetDim_Drawings($Txt, $Pos, $FieldPos, $FieldLen, $EntityOffset, $dim_inner) {
 
 		// The <a:ext> coordinates must have been found previously.
 		if ($dim_inner===false) return false;
@@ -1745,7 +1830,7 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		foreach ($el_lst as $i=>$el) {
 			$loc = clsTbsXmlLoc::FindElement($Txt, $el, $p, true);
 			if ($loc===false) return false;
-			$beg =  $Offset + $loc->GetInnerStart();
+			$beg =  $EntityOffset + $loc->GetInnerStart();
 			if ($beg>$FieldPos) $beg = $beg - $FieldLen;
 			$val = $dim_inner[$i.'v'];
 			$tval = $loc->GetInnerSrc();
@@ -1768,7 +1853,7 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 	/**
 	 * Return the path of the image on the server corresponding the current field being merged.
 	 */
-	function TbsPicExternalPath(&$Value, &$PrmLst) {
+	function TbsPicExternalPath(&$Value, &$PrmLst, $Loc) {
 	
 		$TBS = &$this->TBS;
 	
@@ -1809,8 +1894,15 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 	 * @param string  $Txt
 	 * @param object  $Loc
 	 * @param array   $Prm     Caller parameter. Only used for error messages.
+	 *
+	 * @return boolean Returne true if the picture is correcly replaced or deleted.
 	 */
 	function TbsPicAdd(&$Value, &$PrmLst, &$Txt, &$Loc, $Prm) {
+		
+		if (isset($PrmLst['pic_canceled'])) {
+			//$Value = '';
+			return false;
+		}
 		
 		if ($Value == '') {
 			// The magnet parameter will delete the picture container
@@ -1822,7 +1914,7 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		$PrmLst['pic_prepared'] = true; // mark the locator as Picture prepared
 		
 		// Path of the external file to copy inside the current document.
-		$ExternalPath = $this->TbsPicExternalPath($Value, $PrmLst);
+		$ExternalPath = $this->TbsPicExternalPath($Value, $PrmLst, $Loc);
 		
 		if ($ExternalPath === false) {
 			if (isset($PrmLst['att'])) {
@@ -1853,10 +1945,14 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		}
 
 		// the value of the current TBS field becomes the full internal path
-		if (isset($this->ExtInfo['pic_path'])) $InternalPath = $this->ExtInfo['pic_path'].$InternalPath;
+		if (isset($this->ExtInfo['pic_path'])) {
+			$InternalPath = $this->ExtInfo['pic_path'].$InternalPath;
+		}
 
 		// actually add the picture inside the archive
-		if ($this->FileGetIdxAdd($InternalPath)===false) $this->FileAdd($InternalPath, $ExternalPath, TBSZIP_FILE, true);
+		if ($this->FileGetIdxAdd($InternalPath)===false) {
+			$this->FileAdd($InternalPath, $ExternalPath, TBSZIP_FILE, true);
+		}
 
 		// preparation for others file in the archive
 		$Rid = false;
@@ -1986,7 +2082,7 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 					}
 				}
 				// edit dimensions
-				foreach ($edit_lst as $what=>$new) {
+				foreach ($edit_lst as $what =>$new ) {
 					$beg  = $tDim[$what.'b'];
 					$len  = $tDim[$what.'l'];
 					$unit = $tDim[$what.'u'];
@@ -2668,10 +2764,12 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 
 	/**
 	 * Read or write an attribute's value or an entity's value in the first element in a given sub-file.
+	 *
 	 * @param {mixed}  $SubFile : the name or the index of the sub-file. Use value false to get the current sub-file.
 	 * @param {string} $ElPath  : path of the element. For example : 'w:document/w:body/w:p'.
 	 * @param {string|boolean} $Att    : the attribute, or false to replace the entity's value.
 	 * @param {string|boolean} $NewVal : the new value, or false to delete the attribute, or null to return the attribute’s value without writing.
+	 *
 	 * @return {string|boolean} Reading : return true if the attribute is found and processed. False otherwise.
 	 *                          Writing : return the value as a string, of false if the attribute or the entity is not found.
 	 *                                    return false if $Att = false and the entity is a self-closing tag.
@@ -3987,8 +4085,12 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 
 	}
 
+	/**
+	 * Build the OpenXmlMap property. It is the map of the types of sub-file in the document, according to the file [Content_Types].xml
+	 * The structure is : [ short_type => [ list of sub-files ],  ]
+	 * Example : ['wordprocessingml.header+xml' => [ 'word/header1.xml', 'word/header2.xml', 'word/header2.xml' ]
+	 */
 	function OpenXML_MapInit() {
-	// read the Content_Type XML file and save a sumup in the OpenXmlMap property.
 
 		$this->OpenXmlMap = array();
 		$Map =& $this->OpenXmlMap;
@@ -4031,8 +4133,14 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 
 	}
 
+	/**
+	 * Return the list of sub-files corresponding to one or several types.
+	 * 
+	 * @param string|array $ShortTypes  A short type, or a list of short types.
+	 * 
+	 * @return array The list of the file names for all the asked types.
+	 */
 	function OpenXML_MapGetFiles($ShortTypes) {
-	// Return all values for a given type (or array of types) in the map.
 		if (is_string($ShortTypes)) $ShortTypes = array($ShortTypes);
 		$res = array();
 		foreach ($ShortTypes as $type) {
@@ -4044,8 +4152,15 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		return $res;
 	}
 
+	/**
+	 * Return the first sub-file corresponding to a type.
+	 * 
+	 * @param string $ShortType  A short type.
+	 * @param string $Default    The default result id no sub-file is found.
+	 * 
+	 * @return string The file name.
+	 */
 	function OpenXML_MapGetMain($ShortType, $Default) {
-	// Return all values for a given type (or array of types) in the map.
 		if (isset($this->OpenXmlMap[$ShortType])) {
 			return $this->OpenXmlMap[$ShortType][0];
 		} else {
@@ -4795,6 +4910,94 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 			$this->mergeCells[] = $loc->PrmLst['ref'];
 			$p = $loc->PosEnd;
 		}
+
+	/**
+	 * MsWord cut the source of the text when a modification is done. This is splitting TBS tags.
+	 * This function repare the split text by searching and delete duplicated layout.
+	 * 
+	 * @param string $Txt  (by reference) the XML source to modify
+	 * @param string $tagR tag name of a Run element
+	 * @param string $tagT tag name of a Text element
+	 * 
+	 * @return integer the number of deleted dublicates.
+	 */
+	function OpenMXL_CleanDuplicatedLayout(&$Txt, $tagR, $tagT) {
+
+		$wro = '<' . $tagR;
+		$wro_len = strlen($wro);
+
+		$wrc = '</' . $tagR;
+		$wrc_len = strlen($wrc);
+
+		$wto = '<' . $tagT;
+		$wto_len = strlen($wto);
+
+		$wtc = '</' . $tagT;
+		$wtc_len = strlen($wtc);
+
+		$preserve = 'xml:space="preserve"';
+		$preserve_len = strlen($preserve);
+
+		$nb_tot = 0;
+		$wro_p = 0;
+		while ( ($wro_p = $this->XML_SearchTagForward($Txt, $wro, $wro_p)) !== false ) { // next <w:r> tag
+			$wto_p = $this->XML_SearchTagForward($Txt, $wto, $wro_p); // next <w:t> tag
+			if ($wto_p === false) return false; // error in the structure of the <w:r> element
+			$first = true;
+			$nb = 0; // number of duplicated layouts for the current text snippet
+			do {
+				$ok = false;
+				$wtc_p = $this->XML_SearchTagForward($Txt, $wtc, $wto_p); // next </w:t> tag
+				if ($wtc_p === false) return false;
+				$wrc_p = $this->XML_SearchTagForward($Txt, $wrc, $wro_p); // next </w:r> tag (only to check inclusion)
+				if ($wrc_p === false) return false;
+				if ( ($wto_p < $wrc_p) && ($wtc_p < $wrc_p) ) { // if the <w:t> is actually included in the <w:r> element
+					if ($first) {
+						// we build the xml that would be the duplicated layout if any
+						$p = strpos($Txt, '<', $wrc_p + $wrc_len);
+						$x = substr($Txt, $wtc_p, $p - $wtc_p); // '</w:t></w:r>   ' may include some linebreaks or spaces after the closing tags
+						$src_to_del = $x . substr($Txt, $wro_p, ($wto_p + $wto_len) - $wro_p); // without the last symbol, like: '</w:t></w:r><w:r>....<w:t'
+						$src_to_del = str_replace('<w:tab/>', '', $src_to_del); // tabs must not be deleted between parts => they nt be in the superfluous string
+						$src_to_del_len = strlen($src_to_del);
+						$first = false;
+					}
+					// if the following source is a duplicated layout then we delete it by joining the <w:r> elements.
+					$p_att = $wtc_p + $src_to_del_len;
+					$x = substr($Txt, $p_att, 1); // help to optimize the check because if it's a duplicated layout, the char after is the end of the '<w:t' element.
+					if ( (($x === ' ') || ($x === '>')) && (substr($Txt, $wtc_p, $src_to_del_len)===$src_to_del) ) {
+						$p_end = strpos($Txt, '>', $p_att); //
+						if ($p_end === false) return false; // error in the structure of the <w:t> tag
+						$Txt = substr_replace($Txt, '', $wtc_p, $p_end - $wtc_p + 1); // delete superfluous part + <w:t> attributes
+						$nb_tot++;
+						$nb++;
+						$ok = true;
+					}
+				}
+			} while ($ok);
+
+			// Add or delete the attribute { xml:space="preserve" } that must be set if there is a space before of after the text
+			if ($nb > 0) {
+				$with_space = false;
+				if ( substr($Txt, $wtc_p - 1, 1) === ' ') $with_space = true;
+				$p_end = strpos($Txt, '>', $wto_p); // first char of the text
+				if ( substr($Txt, $p_end + 1, 1) === ' ') $with_space = true;
+				$src = substr($Txt, $wto_p, $p_end - $wto_p + 1);
+				$p = strpos($src, $preserve);
+				if ( $with_space && ($p === false) ) {
+					// add the attribute
+					$Txt = substr_replace($Txt, ' ' . $preserve, $p_end, 0);
+				} elseif ( (!$with_space) && ($p !== false) ) {
+					// delete the attribute
+					$Txt = substr_replace($Txt, '', $wto_p + $p -1, $preserve_len + 1); // delete the attribut with the space before it
+				}
+			}
+
+			$wro_p = $wro_p + $wro_len;
+
+		}
+
+		return $nb_tot; // number of total replacements
+
 	}
 
 	function MsExcel_ConvertToRelative(&$Txt) {
@@ -5545,6 +5748,7 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 	// Clean tags in an Ms Powerpoint slide
 	function MsPowerpoint_Clean(&$Txt) {
 
+		// Simplify Run Properties elements
 		$this->MsPowerpoint_CleanRpr($Txt, 'a:rPr');
 		$Txt = str_replace('<a:rPr/>', '', $Txt);
 
@@ -5559,8 +5763,13 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		// An <a:r> must contain at least one <a:t>. An empty <a:t> may exist after several merges or an OpenTBS cleans.
 		$Txt = str_replace('<a:r><a:t></a:t></a:r>', '', $Txt);
 
+		$this->OpenMXL_CleanDuplicatedLayout($Txt, 'a:r', 'a:t');
+
 	}
 
+	/**
+	 * Simplfy elements by deleting useless attributes 
+	 */
 	function MsPowerpoint_CleanRpr(&$Txt, $elem) {
 		$p = 0;
 		while ($x = clsTbsXmlLoc::FindStartTag($Txt, $elem, $p)) {
@@ -5715,7 +5924,7 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		$this->XML_DeleteElements($Txt, array('w:proofErr', 'w:noProof', 'w:lang', 'w:lastRenderedPageBreak'));
 		$this->MsWord_CleanSystemBookmarks($Txt);
 		$this->MsWord_CleanRsID($Txt);
-		$this->MsWord_CleanDuplicatedLayout($Txt);
+		$this->OpenMXL_CleanDuplicatedLayout($Txt, 'w:r', 'w:t');
 	}
 	
 	/**
@@ -5811,90 +6020,6 @@ If they are blank spaces, line beaks, or other unexpected characters, then you h
 		$Txt = str_replace('<w:pPr></w:pPr>', '', $Txt);
 
 		return $nbr_del;
-
-	}
-
-	/**
-	 * MsWord cut the source of the text when a modification is done. This is splitting TBS tags.
-	 * This function repare the split text by searching and delete duplicated layout.
-	 * Return the number of deleted dublicates.
-	 */
-	function MsWord_CleanDuplicatedLayout(&$Txt) {
-
-		$wro = '<w:r';
-		$wro_len = strlen($wro);
-
-		$wrc = '</w:r';
-		$wrc_len = strlen($wrc);
-
-		$wto = '<w:t';
-		$wto_len = strlen($wto);
-
-		$wtc = '</w:t';
-		$wtc_len = strlen($wtc);
-
-		$preserve = 'xml:space="preserve"';
-		$preserve_len = strlen($preserve);
-
-		$nb_tot = 0;
-		$wro_p = 0;
-		while ( ($wro_p = $this->XML_SearchTagForward($Txt, $wro, $wro_p)) !== false ) { // next <w:r> tag
-			$wto_p = $this->XML_SearchTagForward($Txt, $wto, $wro_p); // next <w:t> tag
-			if ($wto_p === false) return false; // error in the structure of the <w:r> element
-			$first = true;
-			$nb = 0; // number of duplicated layouts for the current text snippet
-			do {
-				$ok = false;
-				$wtc_p = $this->XML_SearchTagForward($Txt, $wtc, $wto_p); // next </w:t> tag
-				if ($wtc_p === false) return false;
-				$wrc_p = $this->XML_SearchTagForward($Txt, $wrc, $wro_p); // next </w:r> tag (only to check inclusion)
-				if ($wrc_p === false) return false;
-				if ( ($wto_p < $wrc_p) && ($wtc_p < $wrc_p) ) { // if the <w:t> is actually included in the <w:r> element
-					if ($first) {
-						// we build the xml that would be the duplicated layout if any
-						$p = strpos($Txt, '<', $wrc_p + $wrc_len);
-						$x = substr($Txt, $wtc_p, $p - $wtc_p); // '</w:t></w:r>   ' may include some linebreaks or spaces after the closing tags
-						$src_to_del = $x . substr($Txt, $wro_p, ($wto_p + $wto_len) - $wro_p); // without the last symbol, like: '</w:t></w:r><w:r>....<w:t'
-						$src_to_del = str_replace('<w:tab/>', '', $src_to_del); // tabs must not be deleted between parts => they nt be in the superfluous string
-						$src_to_del_len = strlen($src_to_del);
-						$first = false;
-					}
-					// if the following source is a duplicated layout then we delete it by joining the <w:r> elements.
-					$p_att = $wtc_p + $src_to_del_len;
-					$x = substr($Txt, $p_att, 1); // help to optimize the check because if it's a duplicated layout, the char after is the end of the '<w:t' element.
-					if ( (($x === ' ') || ($x === '>')) && (substr($Txt, $wtc_p, $src_to_del_len)===$src_to_del) ) {
-						$p_end = strpos($Txt, '>', $p_att); //
-						if ($p_end === false) return false; // error in the structure of the <w:t> tag
-						$Txt = substr_replace($Txt, '', $wtc_p, $p_end - $wtc_p + 1); // delete superfluous part + <w:t> attributes
-						$nb_tot++;
-						$nb++;
-						$ok = true;
-					}
-				}
-			} while ($ok);
-
-			// Add or delete the attribute { xml:space="preserve" } that must be set if there is a space before of after the text
-			if ($nb > 0) {
-				$with_space = false;
-				if ( substr($Txt, $wtc_p - 1, 1) === ' ') $with_space = true;
-				$p_end = strpos($Txt, '>', $wto_p); // first char of the text
-				if ( substr($Txt, $p_end + 1, 1) === ' ') $with_space = true;
-				$src = substr($Txt, $wto_p, $p_end - $wto_p + 1);
-				$p = strpos($src, $preserve);
-				if ( $with_space && ($p === false) ) {
-					// add the attribute
-					$Txt = substr_replace($Txt, ' ' . $preserve, $p_end, 0);
-				} elseif ( (!$with_space) && ($p !== false) ) {
-					// delete the attribute
-					$Txt = substr_replace($Txt, '', $wto_p + $p -1, $preserve_len + 1); // delete the attribut with the space before it
-				}
-			}
-
-			$wro_p = $wro_p + $wro_len;
-
-		}
-
-		return $nb_tot; // number of total replacements
 
 	}
 
@@ -7597,7 +7722,7 @@ class clsTbsXmlLoc {
 	public $PosBeg;      // Position of the first char ('<') of the element.
 	public $PosEnd;      // Position of the char '>' of the start tag or the end tag, depending on whether the end tag has beend seached or not ($pET_PosBeg === false).
 	public $SelfClosing; // null|false|true, null means unknown.
-	public $Txt;
+	public $Txt;         // (by reference) Source of the contents where the locator is placed.
 	public $Name = ''; 
 	public $Exists;      // False means it is a phantom element
 
@@ -7614,6 +7739,7 @@ class clsTbsXmlLoc {
 
 	// PHP 8.2 Compatibility
 	private $pST_PosBeg;
+	public $xlsxFileIdx;
 	
 	/**
 	 * Search a start tag of an element in the TXT contents, and return an object if it is found.
@@ -8074,7 +8200,8 @@ class clsTbsXmlLoc {
 	}
 
 	/**
-	 * Find ans store the ending tag of the object.
+	 * Find the ending tag of the entity.
+     * The result is put in cache for other calls.
 	 * 
 	 * @param boolean $Encaps (optional, true by default) Indicates if the element can be self encapsulated (like <div>).
 	 *
@@ -8104,8 +8231,11 @@ class clsTbsXmlLoc {
 		return true;
 	}
 
-	// Swith the locator to a relative one that has no XML contents before and no XML contents after.
-	// Useful to save time in search and replace.
+	/**
+	 * Switch a normal locator to a relative locator.
+	 * A relative locator is isolated : it has no text before and no text after.
+	 * Relative locators are useful to save time in search and replace within the locator.
+	 */
 	function switchToRelative() {
 		$this->FindEndTag();
 		// Save info
@@ -8119,7 +8249,9 @@ class clsTbsXmlLoc {
 		$this->_ApplyDiffToAll(-$this->PosBeg);
 	}
 
-	// To use after switchToRelative(): save modification to the normal contents and update positions.
+	/**
+	 * To use after switchToRelative(): save modification to the normal contents and update positions.
+	 */
 	function switchToNormal() {
 		// Save info
 		$src = $this->GetSrc();
@@ -8146,8 +8278,8 @@ class clsTbsXmlCellReader extends clsTbsXmlLoc {
 }
 
 /*
-TbsZip version 2.16 + compatibility PHP 8.2
-Date    : 2014-04-08
+TbsZip version 2.17
+Date    : 2023-09-16
 Author  : Skrol29 (email: http://www.tinybutstrong.com/onlyyou.html)
 Licence : LGPL
 This class is independent from any other classes and has been originally created for the OpenTbs plug-in
@@ -8166,6 +8298,26 @@ class clsTbsZip {
 	public $DisplayError;
 	public $ArchFile;
 	public $Error;
+	
+	// Compatibility PHP 8.2
+	public $ArchHnd;
+	public $ArchIsNew;
+	public $CdEndPos;
+	public $CdPos;
+	public $CdInfo;
+	public $ArchIsStream;
+	public $CdFileLst;
+	public $CdFileNbr;
+	public $CdFileByName;
+	public $VisFileLst;
+	public $LastReadComp;
+	public $LastReadIdx;
+	public $ReplInfo;
+	public $ReplByPos;
+	public $AddInfo;
+	public $OutputMode;
+	public $OutputHandle;
+	public $OutputSrc;
 
 	function __construct() {
 		$this->Meth8Ok = extension_loaded('zlib'); // check if Zlib extension is available. This is need for compress and uncompress with method 8.
@@ -8174,8 +8326,10 @@ class clsTbsZip {
 		$this->Error = false;
 	}
 
+	/**
+	 * Create a new virtual empty archive, the name will be the default name when the archive is flushed.
+	 */
 	function CreateNew($ArchName='new.zip') {
-	// Create a new virtual empty archive, the name will be the default name when the archive is flushed.
 		if (!isset($this->Meth8Ok)) $this->__construct();  // for PHP 4 compatibility
 		$this->Close(); // note that $this->ArchHnd is set to false here
 		$this->Error = false;
@@ -8187,8 +8341,11 @@ class clsTbsZip {
 		$this->CdPos = $this->CdInfo['p_cd'];
 	}
 
+	/**
+	 * Open the zip archive
+	 */
 	function Open($ArchFile, $UseIncludePath=false) {
-	// Open the zip archive
+
 		if (!isset($this->Meth8Ok)) $this->__construct();  // for PHP 4 compatibility
 		$this->Close(); // close handle and init info
 		$this->Error = false;
@@ -8400,8 +8557,10 @@ class clsTbsZip {
 		return ($this->FileGetIdx($NameOrIdx)!==false);
 	}
 
-	function FileGetIdx($NameOrIdx) {
-	// Check if a file name, or a file index exists in the Central Directory, and return its index
+	/**
+	 * Check if a file name, or a file index exists in the Central Directory, and return its index
+	 */
+	 function FileGetIdx($NameOrIdx) {
 		if (is_string($NameOrIdx)) {
 			if (isset($this->CdFileByName[$NameOrIdx])) {
 				return $this->CdFileByName[$NameOrIdx];
@@ -8417,8 +8576,10 @@ class clsTbsZip {
 		}
 	}
 
+	/**
+	 * Check if a file name exists in the list of file to add, and return its index
+	 */
 	function FileGetIdxAdd($Name) {
-	// Check if a file name exists in the list of file to add, and return its index
 		if (!is_string($Name)) return false;
 		$idx_lst = array_keys($this->AddInfo);
 		foreach ($idx_lst as $idx) {
@@ -8465,8 +8626,10 @@ class clsTbsZip {
 
 	}
 
+	/**
+	 * Read the file header (and maybe the data ) in the archive, assuming the cursor in at a new file position
+	 */
 	function _ReadFile($idx, $ReadData) {
-	// read the file header (and maybe the data ) in the archive, assuming the cursor in at a new file position
 
 		$b = $this->_ReadData(30);
 
@@ -8544,8 +8707,10 @@ class clsTbsZip {
 
 	}
 
+	/**
+	 * Store replacement information.
+	 */
 	function FileReplace($NameOrIdx, $Data, $DataType=TBSZIP_STRING, $Compress=true) {
-	// Store replacement information.
 
 		$idx = $this->FileGetIdx($NameOrIdx);
 		if ($idx===false) return $this->RaiseError('File "'.$NameOrIdx.'" is not found in the Central Directory.');
@@ -8597,9 +8762,11 @@ class clsTbsZip {
 
 	}
 
+	/**
+	 * Cancel added, modified or deleted modifications on a file in the archive.
+	 * @return integer The number of cancellations.
+	 */
 	function FileCancelModif($NameOrIdx, $ReplacedAndDeleted=true) {
-	// cancel added, modified or deleted modifications on a file in the archive
-	// return the number of cancels
 
 		$nbr = 0;
 
@@ -9093,8 +9260,10 @@ class clsTbsZip {
 
 	}
 
+	/**
+	 * Returns the real size of data
+	 */
 	function _DataPrepare(&$Ref) {
-	// returns the real size of data
 		if ($Ref['path']!==false) {
 			$Ref['data'] = file_get_contents($Ref['path']);
 			if ($Ref['crc32']===false) $Ref['crc32'] = crc32($Ref['data']);
@@ -9106,8 +9275,10 @@ class clsTbsZip {
 		}
 	}
 
-	function _EstimateNewArchSize($Optim=true) {
-	// Return the size of the new archive, or false if it cannot be calculated (because of external file that must be compressed before to be insered)
+	/**
+	 * Return the size of the new archive, or false if it cannot be calculated (because of external file that must be compressed before to be insered)
+	 */
+	 function _EstimateNewArchSize($Optim=true) {
 
 		if ($this->ArchIsNew) {
 			$Len = strlen($this->CdInfo['bin']);

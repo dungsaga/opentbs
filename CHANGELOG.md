@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.12.1] - 2024-03-06
+
+### Enhancements
+
+- OPENTBS_GET_FILES_BY_TYPE supports new keywords : 'all' and 'slidem'
+
+- PPTX : better XML clean for TBS fields recognition.
+
+## [1.12.0] - 2024-01-25
+
+### New feature
+
+- new command OPENTBS_GET_FILES_BY_TYPE
+
+### Enhancements
+
+- PHP 8.2 compatibility improved
+
+### Bug fixes
+
+- OPENTBS_SEARCH_IN_SLIDES for ODP file always return error
+
+## [1.11.3] - 2023-12-02
+
+### Bug fixes
+
+- Two properties turned to public in order to be used by plugins.
+
+## [1.11.2] - 2023-09-29
+
+### Bug fixes
+
+- Picture with Ms Office : changing a picture using parameter 'adjust' can corrupt the XML.
+
+## [1.11.1] - 2023-09-17
+
+### Enhancements
+
+- PHP 8.2 compatibility for subclass TbsZip
+
 ## [1.11.0] - 2023-05-15
 
 ### Enhancements
